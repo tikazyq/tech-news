@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Tech News Digest — fetches top stories from multiple sources, summarizes, sends to Telegram."""
+"""Tech News Digest — in-depth briefing with article summaries, sent to Telegram."""
 
-import json
 import re
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scrapling import Fetcher
@@ -17,23 +16,100 @@ TELEGRAM_CHAT_ID = "5465534784"
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
 NOW = datetime.now(timezone.utc)
-DAY_AGO = NOW - timedelta(hours=24)
-
-TOP_N = 10  # final stories to send
+DATE_STR = NOW.strftime("%Y-%m-%d")
+TOP_N = 6  # fewer stories, deeper coverage
 
 PRIORITY_KEYWORDS = [
     "ai", "artificial intelligence", "llm", "gpt", "openai", "anthropic", "gemini",
-    "machine learning", "deep learning", "neural", "transformer",
+    "claude", "machine learning", "deep learning", "neural", "transformer",
     "apple", "google", "microsoft", "meta", "amazon", "nvidia", "tesla",
     "open source", "opensource", "github", "linux", "rust", "python",
     "startup", "funding", "acquisition", "ipo", "layoff",
-    "security", "vulnerability", "breach", "hack",
+    "security", "vulnerability", "breach", "hack", "malware",
     "regulation", "antitrust", "privacy", "gdpr",
     "chip", "semiconductor", "quantum",
-    "developer", "dev tools", "ide", "compiler", "framework",
+    "developer", "dev tools", "framework",
 ]
 
 fetcher = Fetcher()
+
+
+# ── Article scraping ───────────────────────────────────────────────────────
+def scrape_article(url):
+    """Scrape article page and extract substantive content for summarization."""
+    try:
+        resp = fetcher.get(url)
+    except Exception:
+        return ""
+
+    paragraphs = []
+
+    # Try structured article selectors first, then broader fallbacks
+    selectors = [
+        "article p",
+        '[class*="article-body"] p',
+        '[class*="post-content"] p',
+        '[class*="entry-content"] p',
+        '[class*="story-body"] p',
+        "main p",
+        ".content p",
+    ]
+
+    for sel in selectors:
+        elems = resp.css(sel)
+        if elems and len(elems) >= 2:
+            for el in elems:
+                text = el.get_all_text().strip() if hasattr(el, 'get_all_text') else (el.text or "").strip()
+                text = re.sub(r"\s+", " ", text)
+                # Skip short fragments, nav items, captions
+                if len(text) > 60 and not text.startswith(("Share", "Comment", "Subscribe", "Sign up", "Read more", "Advertisement")):
+                    paragraphs.append(text)
+            if paragraphs:
+                break
+
+    # Fallback: meta description + og:description
+    if not paragraphs:
+        for attr_name, attr_key in [('meta[name="description"]', "content"),
+                                     ('meta[property="og:description"]', "content")]:
+            meta = resp.css(attr_name)
+            if meta:
+                desc = meta[0].attrib.get(attr_key, "").strip()
+                if desc and len(desc) > 40:
+                    paragraphs.append(desc)
+
+    return "\n".join(paragraphs)
+
+
+def extract_summary(full_text, max_chars=500):
+    """Extract a coherent summary from scraped article text.
+
+    Takes the opening paragraphs (which typically contain the lede and key facts)
+    and truncates at sentence boundaries.
+    """
+    if not full_text:
+        return ""
+
+    # Clean HTML remnants
+    text = re.sub(r"<[^>]+>", "", full_text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if len(text) <= max_chars:
+        return text
+
+    # Take first max_chars and cut at the last sentence boundary
+    cut = text[:max_chars]
+    # Find last sentence-ending punctuation
+    best = -1
+    for sep in [". ", "! ", "? ", ".\n"]:
+        idx = cut.rfind(sep)
+        if idx > best:
+            best = idx
+
+    if best > max_chars * 0.4:
+        return cut[: best + 1].strip()
+
+    # Fall back to word boundary
+    return cut.rsplit(" ", 1)[0].strip() + "…"
 
 
 # ── Source fetchers ─────────────────────────────────────────────────────────
@@ -44,7 +120,7 @@ def fetch_hn_stories(limit=30):
         resp = fetcher.get("https://hacker-news.firebaseio.com/v0/topstories.json")
         ids = resp.json()[:limit]
     except Exception as e:
-        print(f"[HN] Failed to get top stories: {e}")
+        print(f"[HN] Failed: {e}")
         return stories
 
     def fetch_item(item_id):
@@ -64,27 +140,26 @@ def fetch_hn_stories(limit=30):
                     "url": item.get("url", f"https://news.ycombinator.com/item?id={item['id']}"),
                     "source": "Hacker News",
                     "score": item.get("score", 0),
-                    "source_detail": f"⬆{item.get('score', 0)}",
+                    "source_detail": f"HN ⬆{item.get('score', 0)}",
                     "time": item.get("time", 0),
                 })
-    print(f"[HN] Fetched {len(stories)} stories")
+    print(f"[HN] {len(stories)} stories")
     return stories
 
 
 def fetch_reddit_stories():
     """Fetch top stories from Reddit tech subreddits."""
     stories = []
-    subreddits = [
-        ("technology", 10),
-        ("programming", 10),
-        ("MachineLearning", 10),
-    ]
+    subreddits = [("technology", 10), ("programming", 10), ("MachineLearning", 10)]
+    headers = {"User-Agent": "TechNewsBot/1.0"}
     for sub, limit in subreddits:
         try:
-            resp = fetcher.get(
+            r = requests.get(
                 f"https://www.reddit.com/r/{sub}/top.json?t=day&limit={limit}",
+                headers=headers, timeout=10,
             )
-            data = resp.json()
+            r.raise_for_status()
+            data = r.json()
             for post in data.get("data", {}).get("children", []):
                 d = post["data"]
                 stories.append({
@@ -97,14 +172,12 @@ def fetch_reddit_stories():
                 })
         except Exception as e:
             print(f"[Reddit r/{sub}] Failed: {e}")
-    print(f"[Reddit] Fetched {len(stories)} stories")
+    print(f"[Reddit] {len(stories)} stories")
     return stories
 
 
 def fetch_rss_stories():
-    """Fetch stories from RSS feeds using scrapling + xml parsing."""
-    import xml.etree.ElementTree as ET
-
+    """Fetch stories from RSS feeds."""
     feeds = [
         ("https://techcrunch.com/feed/", "TechCrunch"),
         ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
@@ -115,27 +188,22 @@ def fetch_rss_stories():
         try:
             resp = fetcher.get(url)
             root = ET.fromstring(resp.body.decode("utf-8", errors="replace"))
-            # Handle both RSS and Atom
             ns = {"atom": "http://www.w3.org/2005/Atom"}
-            items = root.findall(".//item")  # RSS
-            if not items:
-                items = root.findall(".//atom:entry", ns)  # Atom
+            items = root.findall(".//item") or root.findall(".//atom:entry", ns)
 
             for item in items[:10]:
-                title = item.findtext("title") or item.findtext("atom:title", namespaces=ns) or ""
+                title = (item.findtext("title") or item.findtext("atom:title", namespaces=ns) or "").strip()
                 link = item.findtext("link") or ""
                 if not link:
                     link_el = item.find("atom:link", ns)
                     if link_el is not None:
                         link = link_el.get("href", "")
-                # Try to get description for summary
                 desc = (
                     item.findtext("description")
                     or item.findtext("atom:summary", namespaces=ns)
                     or item.findtext("atom:content", namespaces=ns)
                     or ""
                 )
-                title = title.strip()
                 if title and link:
                     stories.append({
                         "title": title,
@@ -143,127 +211,66 @@ def fetch_rss_stories():
                         "source": source_name,
                         "score": 0,
                         "source_detail": source_name,
-                        "time": time.time(),  # approximate as now
-                        "description": desc,
+                        "time": time.time(),
+                        "rss_description": desc,
                     })
         except Exception as e:
             print(f"[RSS {source_name}] Failed: {e}")
-    print(f"[RSS] Fetched {len(stories)} stories")
+    print(f"[RSS] {len(stories)} stories")
     return stories
-
-
-def scrape_article_summary(url, timeout=8):
-    """Scrape the article page and extract the first ~2 sentences as a summary."""
-    try:
-        resp = fetcher.get(url)
-        # Try meta description first (most reliable)
-        meta = resp.css('meta[name="description"]')
-        if meta:
-            desc = meta[0].attrib.get("content", "").strip()
-            if desc and len(desc) > 30:
-                return _truncate(desc, 200)
-
-        # Try og:description
-        og = resp.css('meta[property="og:description"]')
-        if og:
-            desc = og[0].attrib.get("content", "").strip()
-            if desc and len(desc) > 30:
-                return _truncate(desc, 200)
-
-        # Fallback: first <p> tags in article body
-        for selector in ["article p", ".post-content p", ".article-body p", "main p", "p"]:
-            paras = resp.css(selector)
-            if paras:
-                text = " ".join(p.text.strip() for p in paras[:2] if p.text)
-                text = re.sub(r"\s+", " ", text).strip()
-                if len(text) > 50:
-                    return _truncate(text, 200)
-    except Exception:
-        pass
-    return ""
-
-
-def _truncate(text, max_len):
-    """Truncate text at sentence boundary."""
-    text = re.sub(r"<[^>]+>", "", text)  # strip any HTML tags
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= max_len:
-        return text
-    cut = text[:max_len]
-    # Try to break at last sentence end
-    for sep in [". ", "! ", "? "]:
-        idx = cut.rfind(sep)
-        if idx > max_len // 2:
-            return cut[: idx + 1]
-    return cut.rsplit(" ", 1)[0] + "…"
 
 
 # ── Scoring & dedup ────────────────────────────────────────────────────────
 def normalize_url(url):
-    """Normalize URL for dedup."""
     url = re.sub(r"^https?://(www\.)?", "", url)
     url = re.sub(r"[?#].*$", "", url)
     return url.rstrip("/").lower()
 
 
 def normalize_title(title):
-    """Normalize title for fuzzy dedup."""
     return re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
 
 
 def compute_priority(story):
-    """Score a story for ranking. Higher = more relevant mainstream tech news."""
+    """Score story for ranking — mainstream tech news first."""
     score = 0
     title_lower = story["title"].lower()
 
-    # Keyword relevance
-    for kw in PRIORITY_KEYWORDS:
-        if kw in title_lower:
-            score += 15
-            break  # one match is enough
+    # Keyword relevance (count multiple matches)
+    kw_hits = sum(1 for kw in PRIORITY_KEYWORDS if kw in title_lower)
+    score += min(kw_hits * 10, 30)
 
-    # Source diversity bonus — boost non-HN sources to balance
-    if story["source"] == "TechCrunch":
-        score += 20
-    elif story["source"] == "Ars Technica":
-        score += 18
-    elif story["source"] == "The Verge":
-        score += 18
-    elif story["source"] == "Reddit":
-        score += 10
+    # Source bonuses to diversify away from HN
+    source_bonus = {"TechCrunch": 25, "Ars Technica": 22, "The Verge": 22, "Reddit": 12}
+    score += source_bonus.get(story["source"], 0)
 
-    # Engagement score (normalized)
+    # Engagement (capped)
     if story["source"] == "Hacker News":
-        score += min(story["score"] / 20, 30)  # cap HN boost at 30
+        score += min(story["score"] / 15, 35)
     elif story["source"] == "Reddit":
-        score += min(story["score"] / 50, 25)
+        score += min(story["score"] / 40, 30)
 
-    # Penalize HN self-posts / Show HN / Ask HN (less mainstream)
+    # Penalize niche HN formats
     if any(tag in title_lower for tag in ["show hn:", "ask hn:", "tell hn:", "launch hn:"]):
-        score -= 20
+        score -= 25
 
     return score
 
 
 def deduplicate(stories):
-    """Remove duplicate stories based on URL and fuzzy title matching."""
     seen_urls = set()
     seen_titles = set()
     unique = []
     for s in stories:
         norm_url = normalize_url(s["url"])
         norm_title = normalize_title(s["title"])
-        # Check URL
         if norm_url in seen_urls:
             continue
-        # Check title similarity (simple word overlap)
         is_dup = False
         for st in seen_titles:
-            words_a = set(norm_title.split())
-            words_b = set(st.split())
+            words_a, words_b = set(norm_title.split()), set(st.split())
             if len(words_a) > 3 and len(words_b) > 3:
-                overlap = len(words_a & words_b) / min(len(words_a), len(words_b))
-                if overlap > 0.7:
+                if len(words_a & words_b) / min(len(words_a), len(words_b)) > 0.65:
                     is_dup = True
                     break
         if is_dup:
@@ -274,11 +281,44 @@ def deduplicate(stories):
     return unique
 
 
+# ── Telegram formatting ───────────────────────────────────────────────────
+def escape_md(text):
+    """Escape Telegram Markdown special characters."""
+    for ch in ("*", "_", "`", "[", "]"):
+        text = text.replace(ch, "")
+    return text
+
+
+def format_message(stories_with_summaries):
+    """Format the digest as a Telegram message with in-depth summaries."""
+    lines = [f"\U0001f4f0 *Tech News Digest — {DATE_STR}*"]
+    lines.append("")
+
+    for i, (story, summary) in enumerate(stories_with_summaries, 1):
+        title = story["title"].replace("[", "(").replace("]", ")")
+        for ch in ("*", "_", "`"):
+            title = title.replace(ch, "")
+        source_tag = story["source_detail"]
+
+        # Title line with link
+        lines.append(f"*{i}. {escape_md(story['title'])}*")
+        lines.append(f"[Read full article \u2192]({story['url']}) | _{source_tag}_")
+
+        # Summary paragraph
+        if summary:
+            lines.append(escape_md(summary))
+
+        lines.append("")  # blank line between stories
+
+    lines.append("_@MarvinZhangTelegramableBot_")
+    return "\n".join(lines)
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 def main():
     print("Fetching stories from all sources...")
 
-    # Fetch from all sources in parallel
+    # Fetch all sources in parallel
     all_stories = []
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = [
@@ -292,9 +332,7 @@ def main():
             except Exception as e:
                 print(f"Source failed: {e}")
 
-    print(f"\nTotal raw stories: {len(all_stories)}")
-
-    # Deduplicate
+    print(f"\nTotal raw: {len(all_stories)}")
     unique = deduplicate(all_stories)
     print(f"After dedup: {len(unique)}")
 
@@ -303,65 +341,62 @@ def main():
         s["priority"] = compute_priority(s)
     unique.sort(key=lambda s: s["priority"], reverse=True)
 
-    # Enforce source diversity: max 4 from any single source in top 10
+    # Source diversity: max 3 from any single source
     top = []
     source_counts = {}
     for s in unique:
         src = s["source"]
-        if source_counts.get(src, 0) >= 4:
+        if source_counts.get(src, 0) >= 3:
             continue
         top.append(s)
         source_counts[src] = source_counts.get(src, 0) + 1
         if len(top) >= TOP_N:
             break
 
-    print(f"Selected top {len(top)} stories")
+    print(f"Selected {len(top)} stories for deep scraping...")
 
-    # Fetch summaries for top stories in parallel
-    print("Fetching article summaries...")
-    summaries = {}
+    # Scrape full articles in parallel
+    article_texts = {}
     with ThreadPoolExecutor(max_workers=5) as pool:
-        future_map = {pool.submit(scrape_article_summary, s["url"]): i for i, s in enumerate(top)}
+        future_map = {pool.submit(scrape_article, s["url"]): i for i, s in enumerate(top)}
         for fut in as_completed(future_map):
             idx = future_map[fut]
             try:
-                summaries[idx] = fut.result()
+                article_texts[idx] = fut.result()
             except Exception:
-                summaries[idx] = ""
+                article_texts[idx] = ""
 
-    # Also check RSS descriptions as fallback
+    # Build summaries (scrape-based, with RSS fallback)
+    stories_with_summaries = []
     for i, s in enumerate(top):
-        if not summaries.get(i) and s.get("description"):
-            desc = re.sub(r"<[^>]+>", "", s["description"])
+        raw = article_texts.get(i, "")
+        summary = extract_summary(raw, max_chars=450)
+
+        # Fallback to RSS description if scraping yielded nothing
+        if not summary and s.get("rss_description"):
+            desc = re.sub(r"<[^>]+>", "", s["rss_description"])
             desc = re.sub(r"\s+", " ", desc).strip()
-            if len(desc) > 30:
-                summaries[i] = _truncate(desc, 200)
+            if len(desc) > 40:
+                summary = extract_summary(desc, max_chars=450)
 
-    # Format message
-    date_str = NOW.strftime("%Y-%m-%d")
-    lines = [f"\U0001f4f0 *Tech News Digest — {date_str}*\n"]
+        if not summary:
+            summary = "(Could not extract summary — click link to read)"
 
-    for i, s in enumerate(top, 1):
-        title = s["title"].replace("[", "(").replace("]", ")")  # escape markdown links
-        # Escape markdown special chars in title for Telegram
-        for ch in ("*", "_", "`"):
-            title = title.replace(ch, "")
-        source_tag = s["source_detail"]
-        line = f"{i}. [{title}]({s['url']}) — _{source_tag}_"
-        summary = summaries.get(i - 1, "")
-        if summary:
-            # Escape markdown in summary
-            for ch in ("*", "_", "`", "[", "]"):
-                summary = summary.replace(ch, "")
-            line += f"\n   {summary}"
-        lines.append(line)
+        stories_with_summaries.append((s, summary))
+        print(f"  [{i+1}] {s['title'][:60]}... => {len(summary)} chars summary")
 
-    lines.append(f"\n_@MarvinZhangTelegramableBot_")
-    message = "\n\n".join(lines)
+    # Format and send
+    message = format_message(stories_with_summaries)
 
-    # Ensure under 4096 chars
+    # Telegram limit is 4096 chars; trim if needed
     if len(message) > 4090:
-        message = message[:4087] + "…"
+        # Re-try with shorter summaries
+        shorter = []
+        for s, summ in stories_with_summaries:
+            shorter.append((s, extract_summary(summ, max_chars=250)))
+        message = format_message(shorter)
+        if len(message) > 4090:
+            message = message[:4087] + "…"
 
     print(f"\nMessage length: {len(message)} chars")
     print("=" * 60)
