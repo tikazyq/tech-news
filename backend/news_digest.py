@@ -19,7 +19,7 @@ from scrapling import Fetcher
 import requests
 
 NOW = datetime.now(timezone.utc)
-TOP_N = 8  # candidates to scrape (Claude will pick final 5-6)
+TOP_N = 12  # candidates to scrape (Claude will pick final 5-6)
 
 PRIORITY_KEYWORDS = [
     "ai", "artificial intelligence", "llm", "gpt", "openai", "anthropic", "gemini",
@@ -149,6 +149,16 @@ def fetch_reddit_stories():
 
 def fetch_rss_stories():
     feeds = [
+        # ── Mainstream / wire services ──
+        ("https://feeds.reuters.com/reuters/technologyNews", "Reuters"),
+        ("https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml", "NYT"),
+        ("https://feeds.bbci.co.uk/news/technology/rss.xml", "BBC"),
+        ("https://feeds.npr.org/1019/rss.xml", "NPR"),
+        ("https://www.cnbc.com/id/19854910/device/rss/rss.html", "CNBC"),
+        ("https://feeds.washingtonpost.com/rss/business/technology", "Washington Post"),
+        ("https://rss.cnn.com/rss/edition_technology.rss", "CNN"),
+        ("https://www.wired.com/feed/rss", "Wired"),
+        # ── Tech-focused outlets ──
         ("https://techcrunch.com/feed/", "TechCrunch"),
         ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
         ("https://www.theverge.com/rss/index.xml", "The Verge"),
@@ -211,15 +221,22 @@ def compute_priority(story):
     kw_hits = sum(1 for kw in PRIORITY_KEYWORDS if kw in title_lower)
     score += min(kw_hits * 10, 30)
 
-    source_bonus = {"TechCrunch": 25, "Ars Technica": 22, "The Verge": 22}
+    # Mainstream / wire services get highest bonus
+    source_bonus = {
+        "Reuters": 40, "AP": 40, "NYT": 38, "BBC": 38,
+        "NPR": 35, "CNBC": 35, "Washington Post": 35, "CNN": 33,
+        "Wired": 28,
+        "TechCrunch": 25, "Ars Technica": 22, "The Verge": 22,
+    }
     score += source_bonus.get(story["source"], 0)
     if "Reddit" in story["source"]:
-        score += 12
+        score += 8  # secondary source
 
+    # HN/Reddit scores still contribute but are capped lower
     if story["source"] == "Hacker News":
-        score += min(story["score"] / 15, 35)
+        score += min(story["score"] / 20, 20)  # secondary source
     elif "Reddit" in story["source"]:
-        score += min(story["score"] / 40, 30)
+        score += min(story["score"] / 40, 20)
 
     if any(tag in title_lower for tag in ["show hn:", "ask hn:", "tell hn:", "launch hn:"]):
         score -= 25
@@ -228,26 +245,49 @@ def compute_priority(story):
 
 
 def deduplicate(stories):
-    seen_urls = set()
-    seen_titles = set()
-    unique = []
+    """Merge stories about the same topic, keeping track of all sources."""
+    groups = []  # list of {"canonical": story, "all_sources": [...]}
+
     for s in stories:
         norm_url = normalize_url(s["url"])
         norm_title = normalize_title(s["title"])
-        if norm_url in seen_urls:
-            continue
-        is_dup = False
-        for st in seen_titles:
-            words_a, words_b = set(norm_title.split()), set(st.split())
-            if len(words_a) > 3 and len(words_b) > 3:
-                if len(words_a & words_b) / min(len(words_a), len(words_b)) > 0.65:
-                    is_dup = True
-                    break
-        if is_dup:
-            continue
-        seen_urls.add(norm_url)
-        seen_titles.add(norm_title)
-        unique.append(s)
+        merged = False
+
+        for g in groups:
+            canon = g["canonical"]
+            # Check URL match
+            if normalize_url(canon["url"]) == norm_url:
+                merged = True
+            else:
+                # Check title similarity
+                canon_title = normalize_title(canon["title"])
+                words_a, words_b = set(norm_title.split()), set(canon_title.split())
+                if len(words_a) > 3 and len(words_b) > 3:
+                    overlap = len(words_a & words_b) / min(len(words_a), len(words_b))
+                    if overlap > 0.65:
+                        merged = True
+
+            if merged:
+                src_entry = {"source": s["source"], "url": s["url"],
+                             "score": s.get("score", 0), "comments": s.get("comments", 0)}
+                g["all_sources"].append(src_entry)
+                # Prefer the version from a mainstream source as canonical
+                if compute_priority(s) > compute_priority(canon):
+                    s["all_sources"] = g["all_sources"]
+                    g["canonical"] = s
+                break
+
+        if not merged:
+            src_entry = {"source": s["source"], "url": s["url"],
+                         "score": s.get("score", 0), "comments": s.get("comments", 0)}
+            groups.append({"canonical": s, "all_sources": [src_entry]})
+
+    # Attach all_sources list to each canonical story
+    unique = []
+    for g in groups:
+        story = g["canonical"]
+        story["all_sources"] = g["all_sources"]
+        unique.append(story)
     return unique
 
 
@@ -274,14 +314,20 @@ def main():
 
     for s in unique:
         s["priority"] = compute_priority(s)
+        # Boost stories covered by multiple sources — these are bigger news
+        n_sources = len(s.get("all_sources", []))
+        if n_sources >= 3:
+            s["priority"] += 20
+        elif n_sources >= 2:
+            s["priority"] += 10
     unique.sort(key=lambda s: s["priority"], reverse=True)
 
-    # Source diversity: max 3 from any single source
+    # Source diversity: max 2 from any single source to ensure breadth
     top = []
     source_counts = {}
     for s in unique:
         src = s["source"]
-        if source_counts.get(src, 0) >= 3:
+        if source_counts.get(src, 0) >= 2:
             continue
         top.append(s)
         source_counts[src] = source_counts.get(src, 0) + 1
@@ -312,6 +358,17 @@ def main():
         # Use RSS summary as fallback
         if not body and s.get("rss_summary"):
             body = s["rss_summary"]
+
+        # Deduplicate source names in all_sources
+        all_sources = s.get("all_sources", [{"source": s["source"], "url": s["url"],
+                                              "score": s["score"], "comments": s.get("comments", 0)}])
+        seen_src_names = set()
+        deduped_sources = []
+        for src in all_sources:
+            if src["source"] not in seen_src_names:
+                seen_src_names.add(src["source"])
+                deduped_sources.append(src)
+
         story = {
             "title": s["title"],
             "url": s["url"],
@@ -319,9 +376,12 @@ def main():
             "score": s["score"],
             "comments": s.get("comments", 0),
             "article_text": body,
+            "all_sources": deduped_sources,
+            "source_count": len(deduped_sources),
         }
         output["stories"].append(story)
-        print(f"  [{i+1}] {s['title'][:70]} ({len(body)} chars)", file=sys.stderr)
+        src_names = ", ".join(src["source"] for src in deduped_sources)
+        print(f"  [{i+1}] {s['title'][:60]} ({len(body)} chars) [{src_names}]", file=sys.stderr)
 
     # Output JSON to stdout
     print(json.dumps(output, ensure_ascii=False, indent=2))
