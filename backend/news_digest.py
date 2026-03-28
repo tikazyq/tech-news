@@ -121,26 +121,34 @@ def fetch_hn_stories(limit=30):
 
 
 def fetch_reddit_stories():
+    """Fetch Reddit stories via RSS feeds (no OAuth required)."""
     stories = []
-    subreddits = [("technology", 10), ("programming", 10), ("MachineLearning", 10)]
-    headers = {"User-Agent": "TechNewsBot/1.0"}
-    for sub, limit in subreddits:
+    subreddits = ["technology", "programming", "MachineLearning"]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    }
+    for sub in subreddits:
         try:
             r = requests.get(
-                f"https://www.reddit.com/r/{sub}/top.json?t=day&limit={limit}",
-                headers=headers, timeout=10,
+                f"https://www.reddit.com/r/{sub}/top/.rss?t=day&limit=10",
+                headers=headers, timeout=15,
             )
             r.raise_for_status()
-            data = r.json()
-            for post in data.get("data", {}).get("children", []):
-                d = post["data"]
-                stories.append({
-                    "title": d["title"],
-                    "url": d.get("url", f"https://reddit.com{d['permalink']}"),
-                    "source": f"Reddit r/{sub}",
-                    "score": d.get("score", 0),
-                    "comments": d.get("num_comments", 0),
-                })
+            root = ET.fromstring(r.content)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            entries = root.findall("atom:entry", ns)
+            for entry in entries[:10]:
+                title = (entry.findtext("atom:title", namespaces=ns) or "").strip()
+                link_el = entry.find("atom:link", ns)
+                link = link_el.get("href", "") if link_el is not None else ""
+                if title and link:
+                    stories.append({
+                        "title": title,
+                        "url": link.strip(),
+                        "source": f"Reddit r/{sub}",
+                        "score": 0,
+                        "comments": 0,
+                    })
         except Exception as e:
             print(f"[Reddit r/{sub}] Failed: {e}", file=sys.stderr)
     print(f"[Reddit] {len(stories)} stories", file=sys.stderr)
@@ -150,24 +158,31 @@ def fetch_reddit_stories():
 def fetch_rss_stories():
     feeds = [
         # ── Mainstream / wire services ──
-        ("https://feeds.reuters.com/reuters/technologyNews", "Reuters"),
-        ("https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml", "NYT"),
         ("https://feeds.bbci.co.uk/news/technology/rss.xml", "BBC"),
         ("https://feeds.npr.org/1019/rss.xml", "NPR"),
         ("https://www.cnbc.com/id/19854910/device/rss/rss.html", "CNBC"),
         ("https://feeds.washingtonpost.com/rss/business/technology", "Washington Post"),
-        ("https://rss.cnn.com/rss/edition_technology.rss", "CNN"),
-        ("https://www.wired.com/feed/rss", "Wired"),
+        ("https://www.zdnet.com/news/rss.xml", "ZDNet"),
+        ("https://www.engadget.com/rss.xml", "Engadget"),
         # ── Tech-focused outlets ──
         ("https://techcrunch.com/feed/", "TechCrunch"),
-        ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
         ("https://www.theverge.com/rss/index.xml", "The Verge"),
+        ("https://www.theregister.com/headlines.atom", "The Register"),
+        ("https://venturebeat.com/feed/", "VentureBeat"),
+        ("https://www.technologyreview.com/feed/", "MIT Tech Review"),
     ]
+    # Use requests with browser-like headers for RSS feeds (scrapling's Fetcher
+    # gets blocked by many RSS endpoints that return 403/503).
+    rss_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
     stories = []
     for url, source_name in feeds:
         try:
-            resp = fetcher.get(url)
-            root = ET.fromstring(resp.body.decode("utf-8", errors="replace"))
+            resp = requests.get(url, headers=rss_headers, timeout=15)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
             ns = {"atom": "http://www.w3.org/2005/Atom"}
             items = root.findall(".//item") or root.findall(".//atom:entry", ns)
 
@@ -197,9 +212,10 @@ def fetch_rss_stories():
                         "comments": 0,
                         "rss_summary": desc[:500] if desc else "",
                     })
+            print(f"[RSS {source_name}] {len(items[:10])} items", file=sys.stderr)
         except Exception as e:
             print(f"[RSS {source_name}] Failed: {e}", file=sys.stderr)
-    print(f"[RSS] {len(stories)} stories", file=sys.stderr)
+    print(f"[RSS] {len(stories)} stories total", file=sys.stderr)
     return stories
 
 
@@ -223,10 +239,10 @@ def compute_priority(story):
 
     # Mainstream / wire services get highest bonus
     source_bonus = {
-        "Reuters": 40, "AP": 40, "NYT": 38, "BBC": 38,
-        "NPR": 35, "CNBC": 35, "Washington Post": 35, "CNN": 33,
-        "Wired": 28,
-        "TechCrunch": 25, "Ars Technica": 22, "The Verge": 22,
+        "BBC": 38, "NPR": 35, "CNBC": 35, "Washington Post": 35,
+        "ZDNet": 28, "Engadget": 25,
+        "TechCrunch": 25, "The Verge": 22, "The Register": 22,
+        "VentureBeat": 22, "MIT Tech Review": 28,
     }
     score += source_bonus.get(story["source"], 0)
     if "Reddit" in story["source"]:
