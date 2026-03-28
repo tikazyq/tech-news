@@ -5,9 +5,14 @@ You are a tech news editor writing a daily morning briefing for busy professiona
 Run the data collector script:
 
 ```
-pip install scrapling curl_cffi browserforge playwright 2>/dev/null
+pip install scrapling curl_cffi browserforge patchright msgspec 2>/dev/null
+python -m patchright install chromium 2>/dev/null
 python3 backend/news_digest.py 2>/dev/null
 ```
+
+The collector uses a stealth browser (Patchright, anti-detection Playwright fork) to
+bypass bot protection on sites like NYT, Reuters, Wired, and Reddit. If the browser
+binary is unavailable, it falls back to plain HTTP requests.
 
 This outputs JSON with ~8 candidate stories, each containing `title`, `url`, `source`, `score`, `comments`, and `article_text` (scraped article body).
 
@@ -22,7 +27,7 @@ From the collected stories, pick the **5-6 most important mainstream tech storie
 
 Skip niche/hobbyist content unless it's exceptionally significant.
 
-**Source priority:** Strongly prefer stories from mainstream outlets (BBC, NPR, CNBC, Washington Post, ZDNet, MIT Tech Review) and established tech publications (TechCrunch, The Verge, The Register, VentureBeat, Engadget). Stories covered by multiple sources are more important. Hacker News is a secondary signal — use it to gauge community interest, but the digest should read like a professional news briefing, not a HN front page recap.
+**Source priority:** Strongly prefer stories from mainstream outlets (Reuters, NYT, BBC, NPR, CNBC, CNN, Washington Post, Wired) and established tech publications (TechCrunch, Ars Technica, The Verge, ZDNet, MIT Tech Review, The Register, VentureBeat, Engadget). Stories covered by multiple sources are more important. Hacker News and Reddit are secondary signals — use them to gauge community interest, but the digest should read like a professional news briefing, not a HN front page recap.
 
 **For each story, write a 2-3 sentence summary in your own words.** Don't just copy the article opening. Explain:
 - What happened
