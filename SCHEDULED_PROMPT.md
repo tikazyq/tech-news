@@ -52,9 +52,10 @@ Apple confirmed it's discontinuing the Mac Pro with no successor planned. The to
 
 ...3-4 more stories...
 
-_Quick links:_
-• [Other headline](url)
-• [Other headline](url)
+_Also worth reading:_
+• [Other headline](url) · _Source_ — one-line description
+• [Other headline](url) · _Source_ — one-line description
+• [Other headline](url) · _Source_ — one-line description
 
 _@MarvinZhangTelegramableBot_
 ```
@@ -67,7 +68,7 @@ Rules:
 - If a story was covered by multiple sources, add "📡 N sources" at the end to highlight cross-source coverage
 - Prefer linking to the mainstream source URL, not the HN/Reddit discussion link
 - Include HN score or Reddit score if available (e.g., `HN ⬆504`) but list mainstream sources first
-- Add 2-3 "Quick links" at the bottom for honorable mentions that didn't make the main cut
+- Add 3-5 "Also worth reading" links at the bottom for honorable mentions that didn't make the main cut. Each should have a linked headline, source attribution in italics, and a short dash-separated description (e.g., `• [Headline](url) · _Source_ — one-line why it matters`)
 - Keep total message under 4000 chars to leave room for formatting
 
 ## Step 4: Send to Telegram
