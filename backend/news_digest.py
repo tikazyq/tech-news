@@ -5,6 +5,10 @@ Tech News Data Collector
 Fetches top tech stories from HN, Reddit, and RSS feeds.
 Scrapes article content for each top candidate.
 Outputs structured JSON to stdout for Claude to editorialize.
+
+Stealth browser setup (one-time):
+    pip install scrapling patchright msgspec
+    python -m patchright install chromium
 """
 
 import json
@@ -34,6 +38,78 @@ PRIORITY_KEYWORDS = [
 ]
 
 fetcher = Fetcher()
+
+# ── Stealth browser helper ────────────────────────────────────────────────
+# StealthyFetcher uses Patchright (anti-detection Playwright fork) with 40+
+# stealth flags to bypass TLS fingerprinting, Cloudflare, and bot detection.
+# Falls back to plain requests when the stealth browser is unavailable.
+
+_stealth_available = None  # lazy-init
+
+
+def _check_stealth():
+    """Check once whether StealthyFetcher + browser are available."""
+    global _stealth_available
+    if _stealth_available is not None:
+        return _stealth_available
+    try:
+        from scrapling import StealthyFetcher
+        # Quick probe to verify the browser binary exists
+        StealthyFetcher.fetch(
+            "https://httpbin.org/status/200",
+            headless=True, disable_resources=True, timeout=15000,
+        )
+        _stealth_available = True
+        print("[Stealth] Browser available — using StealthyFetcher", file=sys.stderr)
+    except Exception as e:
+        _stealth_available = False
+        print(f"[Stealth] Browser unavailable ({e.__class__.__name__}), falling back to requests", file=sys.stderr)
+    return _stealth_available
+
+
+def stealth_fetch_xml(url):
+    """Fetch a URL using the stealth browser, return bytes content."""
+    from scrapling import StealthyFetcher
+    resp = StealthyFetcher.fetch(
+        url,
+        headless=True,
+        disable_resources=True,
+        network_idle=True,
+        timeout=20000,
+    )
+    if resp.status >= 400:
+        raise Exception(f"HTTP {resp.status}")
+    # resp.text has the page source; encode back to bytes for XML parsing
+    return resp.text.encode("utf-8")
+
+
+REQUESTS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+}
+
+
+def fetch_xml(url):
+    """Fetch XML content, trying requests first then stealth browser on 403/503."""
+    try:
+        resp = requests.get(url, headers=REQUESTS_HEADERS, timeout=15)
+        if resp.status_code < 400:
+            return resp.content
+        # Got a 4xx/5xx — try stealth if available
+        if _check_stealth():
+            print(f"  [Stealth retry] {url}", file=sys.stderr)
+            return stealth_fetch_xml(url)
+        resp.raise_for_status()  # will raise
+    except requests.exceptions.HTTPError:
+        raise
+    except requests.exceptions.RequestException as e:
+        # Connection-level failure (proxy block, DNS, etc.) — try stealth
+        if _check_stealth():
+            print(f"  [Stealth retry] {url}", file=sys.stderr)
+            return stealth_fetch_xml(url)
+        raise
+    return resp.content
 
 
 # ── Article scraping ───────────────────────────────────────────────────────
@@ -121,20 +197,14 @@ def fetch_hn_stories(limit=30):
 
 
 def fetch_reddit_stories():
-    """Fetch Reddit stories via RSS feeds (no OAuth required)."""
+    """Fetch Reddit stories via RSS feeds, with stealth browser fallback."""
     stories = []
     subreddits = ["technology", "programming", "MachineLearning"]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    }
     for sub in subreddits:
+        url = f"https://www.reddit.com/r/{sub}/top/.rss?t=day&limit=10"
         try:
-            r = requests.get(
-                f"https://www.reddit.com/r/{sub}/top/.rss?t=day&limit=10",
-                headers=headers, timeout=15,
-            )
-            r.raise_for_status()
-            root = ET.fromstring(r.content)
+            content = fetch_xml(url)
+            root = ET.fromstring(content)
             ns = {"atom": "http://www.w3.org/2005/Atom"}
             entries = root.findall("atom:entry", ns)
             for entry in entries[:10]:
@@ -155,37 +225,44 @@ def fetch_reddit_stories():
     return stories
 
 
+def _parse_rss_items(content):
+    """Parse RSS/Atom XML content and return (root, items, namespace)."""
+    root = ET.fromstring(content)
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    items = root.findall(".//item") or root.findall(".//atom:entry", ns)
+    return root, items, ns
+
+
 def fetch_rss_stories():
     feeds = [
         # ── Mainstream / wire services ──
+        ("https://feeds.reuters.com/reuters/technologyNews", "Reuters"),
+        ("https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml", "NYT"),
         ("https://feeds.bbci.co.uk/news/technology/rss.xml", "BBC"),
         ("https://feeds.npr.org/1019/rss.xml", "NPR"),
         ("https://www.cnbc.com/id/19854910/device/rss/rss.html", "CNBC"),
         ("https://feeds.washingtonpost.com/rss/business/technology", "Washington Post"),
-        ("https://www.zdnet.com/news/rss.xml", "ZDNet"),
-        ("https://www.engadget.com/rss.xml", "Engadget"),
+        ("https://rss.cnn.com/rss/edition_technology.rss", "CNN"),
+        ("https://www.wired.com/feed/rss", "Wired"),
         # ── Tech-focused outlets ──
         ("https://techcrunch.com/feed/", "TechCrunch"),
+        ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
         ("https://www.theverge.com/rss/index.xml", "The Verge"),
+        # ── Backup feeds (in case originals are blocked) ──
+        ("https://www.zdnet.com/news/rss.xml", "ZDNet"),
+        ("https://www.engadget.com/rss.xml", "Engadget"),
         ("https://www.theregister.com/headlines.atom", "The Register"),
         ("https://venturebeat.com/feed/", "VentureBeat"),
         ("https://www.technologyreview.com/feed/", "MIT Tech Review"),
     ]
-    # Use requests with browser-like headers for RSS feeds (scrapling's Fetcher
-    # gets blocked by many RSS endpoints that return 403/503).
-    rss_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "application/rss+xml, application/xml, text/xml, */*",
-    }
     stories = []
+    succeeded_sources = set()
     for url, source_name in feeds:
         try:
-            resp = requests.get(url, headers=rss_headers, timeout=15)
-            resp.raise_for_status()
-            root = ET.fromstring(resp.content)
-            ns = {"atom": "http://www.w3.org/2005/Atom"}
-            items = root.findall(".//item") or root.findall(".//atom:entry", ns)
+            content = fetch_xml(url)
+            _, items, ns = _parse_rss_items(content)
 
+            count = 0
             for item in items[:10]:
                 title = (item.findtext("title") or item.findtext("atom:title", namespaces=ns) or "").strip()
                 link = item.findtext("link") or ""
@@ -212,10 +289,12 @@ def fetch_rss_stories():
                         "comments": 0,
                         "rss_summary": desc[:500] if desc else "",
                     })
-            print(f"[RSS {source_name}] {len(items[:10])} items", file=sys.stderr)
+                    count += 1
+            succeeded_sources.add(source_name)
+            print(f"[RSS {source_name}] {count} items", file=sys.stderr)
         except Exception as e:
             print(f"[RSS {source_name}] Failed: {e}", file=sys.stderr)
-    print(f"[RSS] {len(stories)} stories total", file=sys.stderr)
+    print(f"[RSS] {len(stories)} stories from {len(succeeded_sources)} sources", file=sys.stderr)
     return stories
 
 
@@ -239,10 +318,11 @@ def compute_priority(story):
 
     # Mainstream / wire services get highest bonus
     source_bonus = {
-        "BBC": 38, "NPR": 35, "CNBC": 35, "Washington Post": 35,
-        "ZDNet": 28, "Engadget": 25,
-        "TechCrunch": 25, "The Verge": 22, "The Register": 22,
-        "VentureBeat": 22, "MIT Tech Review": 28,
+        "Reuters": 40, "AP": 40, "NYT": 38, "BBC": 38,
+        "NPR": 35, "CNBC": 35, "Washington Post": 35, "CNN": 33,
+        "Wired": 28, "MIT Tech Review": 28, "ZDNet": 28,
+        "TechCrunch": 25, "Ars Technica": 22, "The Verge": 22,
+        "The Register": 22, "VentureBeat": 22, "Engadget": 25,
     }
     score += source_bonus.get(story["source"], 0)
     if "Reddit" in story["source"]:
@@ -310,6 +390,9 @@ def deduplicate(stories):
 # ── Main ────────────────────────────────────────────────────────────────────
 def main():
     print("Fetching stories from all sources...", file=sys.stderr)
+
+    # Pre-check stealth browser availability (done once, reused by all fetchers)
+    _check_stealth()
 
     all_stories = []
     with ThreadPoolExecutor(max_workers=3) as pool:
