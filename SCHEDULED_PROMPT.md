@@ -16,9 +16,25 @@ binary is unavailable, it falls back to plain HTTP requests.
 
 This outputs JSON with ~8 candidate stories, each containing `title`, `url`, `source`, `score`, `comments`, and `article_text` (scraped article body).
 
-## Step 2: Sanity-check the collected data
+## Step 1b: Supplement with web search
 
-Before writing the briefing, review the collector output for quality issues:
+After running the collector, use your **WebSearch** tool to search for today's top tech news. Run 2-3 searches:
+
+1. `"top tech news today"` — broad coverage check
+2. `"AI news today"` — since AI is the highest-priority topic
+3. One more search if a major breaking story seems underrepresented (e.g. a big security breach, a major acquisition, a regulatory action)
+
+**Purpose:** The collector's RSS feeds and APIs may miss breaking stories, or may be partially blocked. Web search fills the gaps. Compare your search results against the collector output:
+
+- **Stories already in the collector data** — good, no action needed. Use the search results to add context or confirm importance.
+- **Major stories missing from the collector** — add them to your candidate list for the briefing. Use the search result snippets and URLs as your source material.
+- **Minor stories only found via search** — skip them unless they're clearly significant.
+
+Do NOT let web search results dominate the briefing. The collector data is the primary source; web search is a safety net to catch blind spots.
+
+## Step 2: Sanity-check all collected data
+
+Before writing the briefing, review the combined data (collector output + web search findings) for quality issues:
 
 1. **Source diversity** — If all stories come from a single source (e.g. only Hacker News), some feeds are likely blocked. Note this but still write the best briefing you can from what's available.
 2. **Stale/irrelevant content** — Drop stories that are clearly outdated (more than 2 days old), spam, press releases disguised as news, or off-topic (gaming deals, lifestyle, celebrity gossip).
