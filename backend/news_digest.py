@@ -90,10 +90,10 @@ REQUESTS_HEADERS = {
 }
 
 
-def fetch_xml(url):
+def fetch_xml(url, timeout=15):
     """Fetch XML content, trying requests first then stealth browser on 403/503."""
     try:
-        resp = requests.get(url, headers=REQUESTS_HEADERS, timeout=15)
+        resp = requests.get(url, headers=REQUESTS_HEADERS, timeout=timeout)
         if resp.status_code < 400:
             return resp.content
         # Got a 4xx/5xx — try stealth if available
@@ -225,6 +225,85 @@ def fetch_reddit_stories():
     return stories
 
 
+def fetch_lobsters_stories():
+    """Fetch stories from Lobsters (community-curated tech news, like HN)."""
+    stories = []
+    try:
+        resp = requests.get("https://lobste.rs/hottest.json", headers=REQUESTS_HEADERS, timeout=15)
+        resp.raise_for_status()
+        items = resp.json()
+        for item in items[:25]:
+            title = item.get("title", "").strip()
+            url = item.get("url") or item.get("comments_url", "")
+            if title and url:
+                stories.append({
+                    "title": title,
+                    "url": url.strip(),
+                    "source": "Lobsters",
+                    "score": item.get("score", 0),
+                    "comments": item.get("comment_count", 0),
+                })
+    except Exception as e:
+        print(f"[Lobsters] Failed: {e}", file=sys.stderr)
+    print(f"[Lobsters] {len(stories)} stories", file=sys.stderr)
+    return stories
+
+
+def fetch_google_news():
+    """Fetch stories from Google News RSS — aggregates stories from major outlets.
+
+    This is especially valuable when direct RSS feeds from outlets like Reuters,
+    NYT, CNN, etc. are blocked by network restrictions, since Google News
+    re-publishes their headlines through its own accessible RSS endpoint.
+    """
+    stories = []
+    feeds = [
+        # Technology topic
+        ("https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en",
+         "technology"),
+        # AI / artificial intelligence search
+        ("https://news.google.com/rss/search?q=artificial+intelligence+OR+AI+OR+LLM+when:1d&hl=en-US&gl=US&ceid=US:en",
+         "ai"),
+    ]
+    seen_titles = set()
+    for url, label in feeds:
+        try:
+            resp = requests.get(url, headers=REQUESTS_HEADERS, timeout=15)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            count = 0
+            for item in root.findall(".//item")[:20]:
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                source_el = item.find("source")
+                source_name = source_el.text.strip() if source_el is not None and source_el.text else "Google News"
+                desc = item.findtext("description") or ""
+                desc = re.sub(r"<[^>]+>", "", desc)
+                desc = re.sub(r"&nbsp;", " ", desc)
+                desc = re.sub(r"\s+", " ", desc).strip()
+
+                # De-duplicate within Google News feeds (same story appears in multiple feeds)
+                title_key = re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
+                if not title or not link or title_key in seen_titles:
+                    continue
+                seen_titles.add(title_key)
+
+                stories.append({
+                    "title": title,
+                    "url": link,
+                    "source": f"Google News ({source_name})",
+                    "score": 0,
+                    "comments": 0,
+                    "rss_summary": desc[:500] if desc else "",
+                })
+                count += 1
+            print(f"[Google News/{label}] {count} items", file=sys.stderr)
+        except Exception as e:
+            print(f"[Google News/{label}] Failed: {e}", file=sys.stderr)
+    print(f"[Google News] {len(stories)} stories total", file=sys.stderr)
+    return stories
+
+
 def _parse_rss_items(content):
     """Parse RSS/Atom XML content and return (root, items, namespace)."""
     root = ET.fromstring(content)
@@ -235,31 +314,33 @@ def _parse_rss_items(content):
 
 def fetch_rss_stories():
     feeds = [
-        # ── Mainstream / wire services ──
-        ("https://feeds.reuters.com/reuters/technologyNews", "Reuters"),
-        ("https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml", "NYT"),
+        # ── Reliable feeds (tested accessible from cloud runtimes) ──
         ("https://feeds.bbci.co.uk/news/technology/rss.xml", "BBC"),
         ("https://feeds.npr.org/1019/rss.xml", "NPR"),
         ("https://www.cnbc.com/id/19854910/device/rss/rss.html", "CNBC"),
-        ("https://feeds.washingtonpost.com/rss/business/technology", "Washington Post"),
-        ("https://rss.cnn.com/rss/edition_technology.rss", "CNN"),
-        ("https://www.wired.com/feed/rss", "Wired"),
-        # ── Tech-focused outlets ──
         ("https://techcrunch.com/feed/", "TechCrunch"),
-        ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
         ("https://www.theverge.com/rss/index.xml", "The Verge"),
-        # ── Backup feeds (in case originals are blocked) ──
         ("https://www.zdnet.com/news/rss.xml", "ZDNet"),
         ("https://www.engadget.com/rss.xml", "Engadget"),
         ("https://www.theregister.com/headlines.atom", "The Register"),
         ("https://venturebeat.com/feed/", "VentureBeat"),
         ("https://www.technologyreview.com/feed/", "MIT Tech Review"),
+        # ── Often blocked by proxies/firewalls (try anyway, short timeout) ──
+        ("https://feeds.reuters.com/reuters/technologyNews", "Reuters"),
+        ("https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml", "NYT"),
+        ("https://feeds.washingtonpost.com/rss/business/technology", "Washington Post"),
+        ("https://rss.cnn.com/rss/edition_technology.rss", "CNN"),
+        ("https://www.wired.com/feed/rss", "Wired"),
+        ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
     ]
+    # Sources known to be blocked in some cloud runtimes — use short timeout
+    _flaky_sources = {"Reuters", "NYT", "Washington Post", "CNN", "Wired", "Ars Technica"}
     stories = []
     succeeded_sources = set()
     for url, source_name in feeds:
         try:
-            content = fetch_xml(url)
+            timeout = 8 if source_name in _flaky_sources else 15
+            content = fetch_xml(url, timeout=timeout)
             _, items, ns = _parse_rss_items(content)
 
             count = 0
@@ -323,16 +404,25 @@ def compute_priority(story):
         "Wired": 28, "MIT Tech Review": 28, "ZDNet": 28,
         "TechCrunch": 25, "Ars Technica": 22, "The Verge": 22,
         "The Register": 22, "VentureBeat": 22, "Engadget": 25,
+        "Lobsters": 10,
     }
-    score += source_bonus.get(story["source"], 0)
-    if "Reddit" in story["source"]:
+    src = story["source"]
+    score += source_bonus.get(src, 0)
+    # Google News items carry the original publisher name — check for known outlets
+    if src.startswith("Google News ("):
+        inner_source = src[len("Google News ("):-1]
+        # Give credit based on the original publisher
+        score += source_bonus.get(inner_source, 15)  # 15 default for Google News unknowns
+    if "Reddit" in src:
         score += 8  # secondary source
 
-    # HN/Reddit scores still contribute but are capped lower
+    # HN/Reddit/Lobsters scores still contribute but are capped lower
     if story["source"] == "Hacker News":
         score += min(story["score"] / 20, 20)  # secondary source
     elif "Reddit" in story["source"]:
         score += min(story["score"] / 40, 20)
+    elif story["source"] == "Lobsters":
+        score += min(story["score"] / 5, 20)
 
     if any(tag in title_lower for tag in ["show hn:", "ask hn:", "tell hn:", "launch hn:"]):
         score -= 25
@@ -395,10 +485,12 @@ def main():
     _check_stealth()
 
     all_stories = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = [
             pool.submit(fetch_hn_stories),
             pool.submit(fetch_reddit_stories),
+            pool.submit(fetch_lobsters_stories),
+            pool.submit(fetch_google_news),
             pool.submit(fetch_rss_stories),
         ]
         for fut in as_completed(futures):
@@ -422,14 +514,20 @@ def main():
     unique.sort(key=lambda s: s["priority"], reverse=True)
 
     # Source diversity: max 2 from any single source to ensure breadth
+    # Normalize Google News sources to a single bucket for diversity limiting
+    def _diversity_key(source):
+        if source.startswith("Google News ("):
+            return "Google News"
+        return source
+
     top = []
     source_counts = {}
     for s in unique:
-        src = s["source"]
-        if source_counts.get(src, 0) >= 2:
+        key = _diversity_key(s["source"])
+        if source_counts.get(key, 0) >= 2:
             continue
         top.append(s)
-        source_counts[src] = source_counts.get(src, 0) + 1
+        source_counts[key] = source_counts.get(key, 0) + 1
         if len(top) >= TOP_N:
             break
 
