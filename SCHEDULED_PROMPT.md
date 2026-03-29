@@ -16,7 +16,19 @@ binary is unavailable, it falls back to plain HTTP requests.
 
 This outputs JSON with ~8 candidate stories, each containing `title`, `url`, `source`, `score`, `comments`, and `article_text` (scraped article body).
 
-## Step 2: Write the morning briefing
+## Step 2: Sanity-check the collected data
+
+Before writing the briefing, review the collector output for quality issues:
+
+1. **Source diversity** — If all stories come from a single source (e.g. only Hacker News), some feeds are likely blocked. Note this but still write the best briefing you can from what's available.
+2. **Stale/irrelevant content** — Drop stories that are clearly outdated (more than 2 days old), spam, press releases disguised as news, or off-topic (gaming deals, lifestyle, celebrity gossip).
+3. **Duplicate stories** — The collector deduplicates, but check for near-duplicates that slipped through (same event, slightly different angle). Merge them and credit all sources.
+4. **Broken or suspicious URLs** — Skip stories whose URLs point to Google News redirect pages (`news.google.com/rss/articles/...`) when a direct source URL is available from `all_sources`. Prefer linking to the original publisher.
+5. **Low-quality summaries** — If `article_text` is empty or very short (under 50 chars) and the `rss_summary` is also empty, the story lacks enough context to summarize well. Deprioritize it unless the headline alone is clearly significant.
+
+If the data looks severely degraded (fewer than 3 usable stories, or all from one source), add a brief editorial note at the bottom of the briefing: `_⚠️ Some news sources were unreachable today — coverage may be narrower than usual._`
+
+## Step 3: Write the morning briefing
 
 From the collected stories, pick the **5-6 most important mainstream tech stories**. Prioritize:
 - AI/ML developments (new models, policy, major company moves)
@@ -27,7 +39,7 @@ From the collected stories, pick the **5-6 most important mainstream tech storie
 
 Skip niche/hobbyist content unless it's exceptionally significant.
 
-**Source priority:** Strongly prefer stories from mainstream outlets (Reuters, NYT, BBC, NPR, CNBC, CNN, Washington Post, Wired) and established tech publications (TechCrunch, Ars Technica, The Verge, ZDNet, MIT Tech Review, The Register, VentureBeat, Engadget). Stories covered by multiple sources are more important. Hacker News and Reddit are secondary signals — use them to gauge community interest, but the digest should read like a professional news briefing, not a HN front page recap.
+**Source priority:** Strongly prefer stories from mainstream outlets (Reuters, NYT, BBC, NPR, CNBC, CNN, Washington Post, Wired) and established tech publications (TechCrunch, Ars Technica, The Verge, ZDNet, MIT Tech Review, The Register, VentureBeat, Engadget). Stories covered by multiple sources are more important. Hacker News, Reddit, and Lobsters are secondary community signals — use them to gauge interest, but the digest should read like a professional news briefing, not a HN front page recap. Google News items carry the original publisher in the source field (e.g. "Google News (Reuters)") — treat these with the same priority as the original outlet.
 
 **For each story, write a 2-3 sentence summary in your own words.** Don't just copy the article opening. Explain:
 - What happened
@@ -35,7 +47,7 @@ Skip niche/hobbyist content unless it's exceptionally significant.
 
 Write in a clear, conversational tone — like a smart friend briefing you over coffee. No jargon dumping.
 
-## Step 3: Format for Telegram
+## Step 4: Format for Telegram
 
 Format as plain Markdown (Telegram-compatible), keeping under 4096 characters total:
 
@@ -71,7 +83,7 @@ Rules:
 - Add 3-5 "Also worth reading" links at the bottom for honorable mentions that didn't make the main cut. Each should have a linked headline, source attribution in italics, and a short dash-separated description (e.g., `• [Headline](url) · _Source_ — one-line why it matters`)
 - Keep total message under 4000 chars to leave room for formatting
 
-## Step 4: Send to Telegram
+## Step 5: Send to Telegram
 
 Send the formatted message via curl:
 
