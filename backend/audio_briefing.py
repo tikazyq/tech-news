@@ -27,29 +27,68 @@ from google.genai import types
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "gemini-2.5-flash-preview-tts"
+DEFAULT_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+DEFAULT_DIALOGUE_MODEL = "gemini-2.5-flash"
 SPEAKER_A = "Kore"   # host — introduces stories
 SPEAKER_B = "Puck"   # co-host — adds color / "why it matters"
+
+DIALOGUE_PROMPT = f"""You are a podcast script writer. Convert the following tech news briefing into a
+natural, engaging two-host dialogue between {SPEAKER_A} and {SPEAKER_B}.
+
+{SPEAKER_A} is the lead host — introduces stories, sets up context.
+{SPEAKER_B} is the co-host — reacts naturally, adds "why it matters" insight, asks follow-up questions.
+
+Guidelines:
+- Sound like two smart friends discussing the news over coffee, NOT like reading a teleprompter
+- Use natural speech patterns: "Oh wow", "Wait, really?", "That's huge", "So basically...", brief laughs
+- Hosts should react to each other, interrupt occasionally, build on each other's points
+- Each story gets 3-6 conversational turns (not just one speaker per story)
+- Include a warm intro and a brief sign-off
+- Keep it concise — aim for 3-5 minutes of spoken content total
+- Do NOT include any URLs, source attributions, or markdown — this is purely spoken word
+- Do NOT include stage directions, sound effects, or parenthetical notes
+
+Output format — each line must be exactly:
+{SPEAKER_A}: dialogue text here
+{SPEAKER_B}: dialogue text here
+
+Here is the briefing to convert:
+
+"""
 
 
 # ── Dialogue generation ─────────────────────────────────────────────────────
 
-def text_to_dialogue(briefing_text: str) -> str:
-    """Split a plain-text briefing into a two-host dialogue script."""
-    story_pattern = re.compile(r'[🔵🔴🟢🟡🟠]\s*')
+def generate_dialogue_via_llm(briefing_text: str, client: genai.Client, model: str) -> str:
+    """Use Gemini LLM to write a natural two-host dialogue from the briefing."""
+    response = client.models.generate_content(
+        model=model,
+        contents=DIALOGUE_PROMPT + briefing_text,
+    )
+    dialogue = response.text.strip()
 
-    # Strip markdown formatting for clean spoken text
+    # Validate that the output has the expected speaker format
+    lines = [l for l in dialogue.split('\n') if l.strip()]
+    valid_lines = [l for l in lines if l.startswith(f"{SPEAKER_A}:") or l.startswith(f"{SPEAKER_B}:")]
+    if len(valid_lines) < 4:
+        raise RuntimeError(f"LLM dialogue generation produced only {len(valid_lines)} valid speaker lines")
+
+    # Return only valid speaker lines (strip any preamble the LLM might add)
+    return '\n'.join(valid_lines)
+
+
+def text_to_dialogue_fallback(briefing_text: str) -> str:
+    """Simple heuristic fallback if LLM dialogue generation fails."""
     clean = briefing_text
-    clean = re.sub(r'\*([^*]+)\*', r'\1', clean)       # *bold*
-    clean = re.sub(r'_([^_]+)_', r'\1', clean)         # _italic_
+    clean = re.sub(r'\*([^*]+)\*', r'\1', clean)
+    clean = re.sub(r'_([^_]+)_', r'\1', clean)
     clean = re.sub(r'\[Read more →\]\([^)]+\)', '', clean)
-    clean = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean)  # [text](url)
+    clean = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean)
     clean = re.sub(r'📡\s*\d+\s*sources?', '', clean)
-    clean = re.sub(r'·', '', clean)
+    clean = re.sub(r'[·🔵🔴🟢🟡🟠]', '', clean)
     clean = re.sub(r'HN\s*⬆\d+', '', clean)
-    clean = re.sub(r'@\w+', '', clean)                  # @bot mentions
+    clean = re.sub(r'@\w+', '', clean)
 
-    # Extract date
     date_match = re.search(r'(\d{4}-\d{2}-\d{2})', clean)
     date_str = date_match.group(1) if date_match else datetime.now(timezone.utc).strftime("%B %d, %Y")
     try:
@@ -57,59 +96,39 @@ def text_to_dialogue(briefing_text: str) -> str:
     except ValueError:
         pass
 
-    # Split into story blocks on emoji boundaries
-    parts = story_pattern.split(clean)
-    stories = []
-    for part in parts:
-        part = part.strip()
-        if not part or len(part) < 30:
-            continue
-        if 'also worth reading' in part.lower():
-            break
-        stories.append(part)
+    blocks = [b.strip() for b in clean.split('\n\n') if len(b.strip()) > 50]
+    stories = blocks[1:7] if len(blocks) > 1 else blocks[:6]
 
-    # Fallback: split on double newlines if emoji splitting failed
-    if len(stories) < 2:
-        blocks = [b.strip() for b in clean.split('\n\n') if len(b.strip()) > 50]
-        stories = blocks[1:] if len(blocks) > 1 else blocks
-
-    # Build dialogue
-    lines = []
-    lines.append(f"{SPEAKER_A}: Good morning! Here's your tech briefing for {date_str}. We've got some interesting stories today.")
-    lines.append(f"{SPEAKER_B}: Let's dive right in.")
-
-    for i, story in enumerate(stories[:6]):
+    lines = [
+        f"{SPEAKER_A}: Good morning! Here's your tech briefing for {date_str}.",
+        f"{SPEAKER_B}: Let's dive right in.",
+    ]
+    for story in stories:
         sentences = re.split(r'(?<=[.!?])\s+', story.strip())
         sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
         if not sentences:
             continue
-
-        # Speaker A introduces with the first 1-2 sentences
         intro_end = min(2, len(sentences))
         lines.append(f"{SPEAKER_A}: {' '.join(sentences[:intro_end])}")
-
-        # Speaker B adds the rest
         if len(sentences) > intro_end:
             lines.append(f"{SPEAKER_B}: {' '.join(sentences[intro_end:])}")
-        elif i < len(stories) - 1:
-            lines.append(f"{SPEAKER_B}: Interesting. What's next?")
 
-    lines.append(f"{SPEAKER_A}: And that's your briefing for today. Stay informed, and we'll see you tomorrow morning.")
+    lines.append(f"{SPEAKER_A}: That's your briefing for today. See you tomorrow morning.")
     lines.append(f"{SPEAKER_B}: Have a great day!")
-
     return '\n'.join(lines)
 
 
 # ── Gemini TTS ───────────────────────────────────────────────────────────────
 
-def generate_audio_wav(dialogue_script: str, output_path: str, model: str) -> str:
+def generate_audio_wav(dialogue_script: str, output_path: str, model: str,
+                       client: genai.Client = None) -> str:
     """Call Gemini TTS to generate multi-speaker audio. Returns WAV path."""
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not set", file=sys.stderr)
-        sys.exit(1)
-
-    client = genai.Client(api_key=api_key)
+    if client is None:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            print("Error: GEMINI_API_KEY environment variable not set", file=sys.stderr)
+            sys.exit(1)
+        client = genai.Client(api_key=api_key)
 
     prompt = f"TTS the following conversation between {SPEAKER_A} and {SPEAKER_B}:\n\n{dialogue_script}"
 
@@ -188,8 +207,10 @@ def main():
     parser = argparse.ArgumentParser(description="Generate podcast-style audio news briefing")
     parser.add_argument("--briefing-text", required=True, help="Path to the briefing text file")
     parser.add_argument("--output-dir", default="/tmp/audio_briefing", help="Output directory")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"Gemini TTS model (default: {DEFAULT_MODEL})")
+    parser.add_argument("--tts-model", default=DEFAULT_TTS_MODEL,
+                        help=f"Gemini TTS model (default: {DEFAULT_TTS_MODEL})")
+    parser.add_argument("--dialogue-model", default=DEFAULT_DIALOGUE_MODEL,
+                        help=f"Gemini model for dialogue script generation (default: {DEFAULT_DIALOGUE_MODEL})")
     parser.add_argument("--format", choices=["mp3", "ogg", "both"], default="mp3",
                         help="Output audio format (default: mp3)")
     args = parser.parse_args()
@@ -199,6 +220,12 @@ def main():
         print("Error: ffmpeg not found. Install with: apt install ffmpeg", file=sys.stderr)
         sys.exit(1)
 
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("Error: GEMINI_API_KEY environment variable not set", file=sys.stderr)
+        sys.exit(1)
+
+    client = genai.Client(api_key=api_key)
     briefing_text = Path(args.briefing_text).read_text()
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -206,16 +233,22 @@ def main():
     mp3_path = os.path.join(args.output_dir, "briefing.mp3")
     ogg_path = os.path.join(args.output_dir, "briefing.ogg")
 
-    # Step 1: Convert briefing to two-host dialogue
-    print("Converting briefing to dialogue script...", file=sys.stderr)
-    dialogue = text_to_dialogue(briefing_text)
+    # Step 1: Generate natural dialogue via LLM (with heuristic fallback)
+    print(f"Generating dialogue script via {args.dialogue_model}...", file=sys.stderr)
+    try:
+        dialogue = generate_dialogue_via_llm(briefing_text, client, args.dialogue_model)
+        print("LLM dialogue generation succeeded", file=sys.stderr)
+    except Exception as e:
+        print(f"LLM dialogue generation failed ({e}), using heuristic fallback", file=sys.stderr)
+        dialogue = text_to_dialogue_fallback(briefing_text)
+
     dialogue_path = os.path.join(args.output_dir, "dialogue.txt")
     Path(dialogue_path).write_text(dialogue)
     print(f"Dialogue saved to {dialogue_path}", file=sys.stderr)
 
     # Step 2: Generate audio via Gemini TTS
-    print(f"Generating audio via {args.model}...", file=sys.stderr)
-    generate_audio_wav(dialogue, wav_path, args.model)
+    print(f"Generating audio via {args.tts_model}...", file=sys.stderr)
+    generate_audio_wav(dialogue, wav_path, args.tts_model, client)
 
     # Step 3: Convert to output format(s)
     result = {}

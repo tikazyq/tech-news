@@ -135,9 +135,11 @@ python3 backend/audio_briefing.py \
   --format mp3 2>&1
 ```
 
-The script converts the briefing into a two-host dialogue (Kore and Puck), then calls **Gemini 2.5 Flash TTS** for multi-speaker audio generation. Output is a podcast-style MP3.
+The script first uses **Gemini Flash** to rewrite the briefing as a natural two-host conversation (Kore and Puck — like a NotebookLM-style podcast), then calls **Gemini 2.5 Flash TTS** for multi-speaker audio synthesis. Output is a podcast-style MP3.
 
-To use the higher-quality Pro model instead, add `--model gemini-2.5-pro-preview-tts` (costs ~2x more but still under $5/month).
+Options:
+- Higher-quality TTS: add `--tts-model gemini-2.5-pro-preview-tts` (~2x cost, still under $5/month)
+- Different dialogue model: add `--dialogue-model gemini-2.5-pro` for richer dialogue writing
 
 If the script fails (e.g., Gemini API error), log the error but **do not skip the text briefing** — audio is an optional enhancement.
 
