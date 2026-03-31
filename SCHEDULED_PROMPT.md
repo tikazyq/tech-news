@@ -5,8 +5,7 @@ You are a tech news editor writing a daily morning briefing for busy professiona
 Run the data collector script:
 
 ```
-pip install scrapling curl_cffi browserforge patchright msgspec google-genai 2>/dev/null
-apt-get install -y ffmpeg || echo "Note: ffmpeg not installed (needed for audio briefing)"
+pip install scrapling curl_cffi browserforge patchright msgspec 2>/dev/null
 python -m patchright install chromium 2>/dev/null
 python3 backend/news_digest.py 2>/dev/null
 ```
@@ -117,41 +116,42 @@ curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm
 
 Always send the digest even if some sources failed. If zero stories were collected, send a short message saying the digest is unavailable today.
 
-## Step 6: Generate audio briefing
+## Step 6: Generate NotebookLM source document
 
-After sending the text briefing, generate a podcast-style audio dialogue version.
+After sending the text briefing, generate a rich source document for NotebookLM's Audio Overview feature.
 
-### 6a. Save the briefing text
+### 6a. Save the raw digest JSON
 
-Save the full briefing you just wrote (including markdown) to `/tmp/briefing.txt`. The script handles markdown stripping internally.
+Save the raw JSON output from Step 1 (the `news_digest.py` output) to `/tmp/digest.json`.
 
-### 6b. Run the audio generator
+### 6b. Generate the source document
 
 ```bash
-export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
-python3 backend/audio_briefing.py \
-  --briefing-text /tmp/briefing.txt \
-  --output-dir /tmp/audio_briefing \
-  --format mp3 2>&1
+python3 backend/notebooklm_source.py \
+  --input /tmp/digest.json \
+  --output /tmp/notebooklm_source.md
 ```
 
-The script first uses **Gemini Flash** to rewrite the briefing as a natural two-host conversation (Kore and Puck — like a NotebookLM-style podcast), then calls **Gemini 2.5 Flash TTS** for multi-speaker audio synthesis. Output is a podcast-style MP3.
+This generates a comprehensive Markdown document optimized for NotebookLM consumption. It includes:
+- Full article texts for each story
+- Multi-source coverage signals (which stories were covered by multiple outlets)
+- Community engagement data (HN scores, Reddit upvotes, comment counts)
+- Editorial context (audience profile, topic priorities)
+- Source credibility rankings
 
-Options:
-- Higher-quality TTS: add `--tts-model gemini-2.5-pro-preview-tts` (~2x cost, still under $5/month)
-- Different dialogue model: add `--dialogue-model gemini-2.5-pro` for richer dialogue writing
+### 6c. Send the source document to Telegram
 
-If the script fails (e.g., Gemini API error), log the error but **do not skip the text briefing** — audio is an optional enhancement.
-
-## Step 7: Send audio to Telegram
+Send the generated document so you can easily paste it into NotebookLM:
 
 ```bash
-curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm4_RveYOfEAs/sendAudio" \
+curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm4_RveYOfEAs/sendDocument" \
   -F chat_id="5465534784" \
-  -F audio=@/tmp/audio_briefing/briefing.mp3 \
-  -F caption="🎧 Audio briefing for YYYY-MM-DD" \
-  -F title="Tech Briefing" \
-  -F performer="AI News Desk"
+  -F document=@/tmp/notebooklm_source.md \
+  -F caption="📎 NotebookLM source for YYYY-MM-DD — paste into NotebookLM to generate Audio Overview"
 ```
 
-Replace `YYYY-MM-DD` with today's date. If the MP3 file is missing (generation failed), skip the send.
+Replace `YYYY-MM-DD` with today's date.
+
+**Workflow:** Open NotebookLM → create a new notebook → paste or upload this document as a source → click "Generate Audio Overview". NotebookLM will produce a natural podcast-style discussion of the day's tech news.
+
+**Note:** NotebookLM does not have a public API for Audio Overview generation. This step prepares the source material; the Audio Overview must be generated manually through the NotebookLM web interface. If Google releases an API for this in the future, this step can be fully automated.
