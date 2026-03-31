@@ -5,7 +5,8 @@ You are a tech news editor writing a daily morning briefing for busy professiona
 Run the data collector script:
 
 ```
-pip install scrapling curl_cffi browserforge patchright msgspec 2>/dev/null
+pip install scrapling curl_cffi browserforge patchright msgspec google-genai 2>/dev/null
+apt-get install -y ffmpeg || echo "Note: ffmpeg needed for audio briefing"
 python -m patchright install chromium 2>/dev/null
 python3 backend/news_digest.py 2>/dev/null
 ```
@@ -116,42 +117,45 @@ curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm
 
 Always send the digest even if some sources failed. If zero stories were collected, send a short message saying the digest is unavailable today.
 
-## Step 6: Generate NotebookLM source document
+## Step 6: Generate audio briefing
 
-After sending the text briefing, generate a rich source document for NotebookLM's Audio Overview feature.
+After sending the text briefing, generate a podcast-style audio dialogue version. The script feeds the **full article texts** from the digest to Gemini, which writes a natural two-host conversation, then synthesizes it as audio.
 
 ### 6a. Save the raw digest JSON
 
-Save the raw JSON output from Step 1 (the `news_digest.py` output) to `/tmp/digest.json`.
+Save the raw JSON output from Step 1 (the `news_digest.py` output) to `/tmp/digest.json`. This contains the full article texts — much richer input than the short text briefing.
 
-### 6b. Generate the source document
+### 6b. Run the audio generator
 
 ```bash
-python3 backend/notebooklm_source.py \
+export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+python3 backend/audio_briefing.py \
   --input /tmp/digest.json \
-  --output /tmp/notebooklm_source.md
+  --output-dir /tmp/audio_briefing \
+  --format mp3 2>&1
 ```
 
-This generates a comprehensive Markdown document optimized for NotebookLM consumption. It includes:
-- Full article texts for each story
-- Multi-source coverage signals (which stories were covered by multiple outlets)
-- Community engagement data (HN scores, Reddit upvotes, comment counts)
-- Editorial context (audience profile, topic priorities)
-- Source credibility rankings
+The script:
+1. Feeds all article texts + metadata to **Gemini Flash**, which writes a natural two-host dialogue (like NotebookLM's Audio Overview — hosts banter, react, explain why things matter)
+2. Sends the dialogue to **Gemini 2.5 Flash TTS** for multi-speaker audio synthesis (voices: Kore and Puck)
+3. Converts to MP3 via ffmpeg
 
-### 6c. Send the source document to Telegram
+Options:
+- `--tts-model gemini-2.5-pro-preview-tts` — higher-quality voice synthesis (~2x cost)
+- `--dialogue-model gemini-2.5-pro` — richer dialogue writing
+- `--format ogg` — OGG/Opus format for Telegram voice messages
 
-Send the generated document so you can easily paste it into NotebookLM:
+If the script fails, log the error but **do not skip the text briefing** — audio is an optional enhancement.
+
+## Step 7: Send audio to Telegram
 
 ```bash
-curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm4_RveYOfEAs/sendDocument" \
+curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm4_RveYOfEAs/sendAudio" \
   -F chat_id="5465534784" \
-  -F document=@/tmp/notebooklm_source.md \
-  -F caption="📎 NotebookLM source for YYYY-MM-DD — paste into NotebookLM to generate Audio Overview"
+  -F audio=@/tmp/audio_briefing/briefing.mp3 \
+  -F caption="🎧 Audio briefing for YYYY-MM-DD" \
+  -F title="Tech Briefing" \
+  -F performer="AI News Desk"
 ```
 
-Replace `YYYY-MM-DD` with today's date.
-
-**Workflow:** Open NotebookLM → create a new notebook → paste or upload this document as a source → click "Generate Audio Overview". NotebookLM will produce a natural podcast-style discussion of the day's tech news.
-
-**Note:** NotebookLM does not have a public API for Audio Overview generation. This step prepares the source material; the Audio Overview must be generated manually through the NotebookLM web interface. If Google releases an API for this in the future, this step can be fully automated.
+Replace `YYYY-MM-DD` with today's date. If the MP3 file is missing (generation failed), skip the send.
