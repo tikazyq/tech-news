@@ -5,7 +5,8 @@ You are a tech news editor writing a daily morning briefing for busy professiona
 Run the data collector script:
 
 ```
-pip install scrapling curl_cffi browserforge patchright msgspec 2>/dev/null
+pip install scrapling curl_cffi browserforge patchright msgspec google-genai Pillow 2>/dev/null
+apt-get install -y ffmpeg 2>/dev/null
 python -m patchright install chromium 2>/dev/null
 python3 backend/news_digest.py 2>/dev/null
 ```
@@ -115,3 +116,53 @@ curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm
 ```
 
 Always send the digest even if some sources failed. If zero stories were collected, send a short message saying the digest is unavailable today.
+
+## Step 6: Generate audio & video briefing
+
+After sending the text briefing, generate a podcast-style audio version and a headline-card video.
+
+### 6a. Prepare input files
+
+1. **Strip markdown** from the briefing you just wrote — remove `*bold*`, `_italic_`, `[text](url)` links, "Read more →" lines, emoji prefixes, `📡 N sources` tags, and HN/Reddit score annotations. Save the clean spoken-word text to `/tmp/briefing.txt`.
+
+2. **Extract headlines** — pull the bold headline string from each main story (not the "Also worth reading" items). Save as a JSON array to `/tmp/headlines.json`. Example:
+   ```json
+   ["Anthropic Wins Court Battle", "Apple Kills the Mac Pro", "OpenAI Launches GPT-5"]
+   ```
+
+### 6b. Run the generator
+
+```bash
+export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+python3 backend/audio_video_gen.py \
+  --briefing-text /tmp/briefing.txt \
+  --headlines /tmp/headlines.json \
+  --output-dir /tmp/av_output 2>&1
+```
+
+The script uses **Gemini 2.5 Flash TTS** to generate a two-host podcast conversation (voices: Kore and Puck), then creates headline-card images and assembles them into an MP4 video with the audio. It prints a JSON object with `audio` and `video` file paths on success.
+
+If the script fails (e.g., Gemini API error), log the error but **do not skip the text briefing** — audio/video is an optional enhancement.
+
+## Step 7: Send audio & video to Telegram
+
+Send the generated files alongside the text briefing:
+
+```bash
+# Send audio
+curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm4_RveYOfEAs/sendAudio" \
+  -F chat_id="5465534784" \
+  -F audio=@/tmp/av_output/briefing.mp3 \
+  -F caption="🎧 Audio briefing for YYYY-MM-DD" \
+  -F title="Tech Briefing" \
+  -F performer="AI News Desk"
+
+# Send video
+curl -s -X POST "https://api.telegram.org/bot8082240790:AAGTsbXS_GGtN7sEvDBbEkbm4_RveYOfEAs/sendVideo" \
+  -F chat_id="5465534784" \
+  -F video=@/tmp/av_output/briefing.mp4 \
+  -F caption="📺 Video briefing for YYYY-MM-DD" \
+  -F supports_streaming=true
+```
+
+Replace `YYYY-MM-DD` with today's date. If either file is missing (generation failed), skip that send and continue.
