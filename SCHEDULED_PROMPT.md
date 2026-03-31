@@ -6,7 +6,7 @@ Run the data collector script:
 
 ```
 pip install scrapling curl_cffi browserforge patchright msgspec google-genai 2>/dev/null
-apt-get install -y ffmpeg 2>/dev/null
+apt-get install -y ffmpeg || echo "Note: ffmpeg not installed (needed for audio briefing)"
 python -m patchright install chromium 2>/dev/null
 python3 backend/news_digest.py 2>/dev/null
 ```

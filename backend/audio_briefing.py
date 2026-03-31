@@ -139,7 +139,14 @@ def generate_audio_wav(dialogue_script: str, output_path: str, model: str) -> st
         ),
     )
 
-    audio_data = response.candidates[0].content.parts[0].inline_data.data
+    if not response.candidates or not response.candidates[0].content.parts:
+        raise RuntimeError("Gemini TTS returned no audio data — check your API key and model name")
+
+    inline_data = response.candidates[0].content.parts[0].inline_data
+    if not inline_data or not inline_data.data:
+        raise RuntimeError("Gemini TTS response contained no audio bytes")
+
+    audio_data = inline_data.data
     with wave.open(output_path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)   # 16-bit
